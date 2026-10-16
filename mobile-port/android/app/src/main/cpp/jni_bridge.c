@@ -10,6 +10,7 @@
 #include "platform/pal_graphics.h"
 #include "platform/pal_input.h"
 #include "scene_title.h"
+#include "scene_field.h"
 #include "psp_asset_loader.h"
 
 #define DS_WIDTH  256
@@ -27,9 +28,6 @@ typedef enum {
 } GameState;
 
 static GameState s_game_state = GAME_STATE_TITLE;
-static int s_player_x = DS_WIDTH / 2;
-static int s_player_y = DS_HEIGHT / 2;
-static int s_frame_counter = 0;
 
 /* Structure interne PAL_Surface identique à scene_title.c */
 typedef struct {
@@ -45,72 +43,17 @@ static uint32_t s_sub_pixels[DS_WIDTH * DS_HEIGHT];
 static SurfaceInternal s_main_internal;
 static SurfaceInternal s_sub_internal;
 
-#define RGBA(r,g,b,a) (((uint32_t)(a)<<24)|((uint32_t)(b)<<16)|((uint32_t)(g)<<8)|(uint32_t)(r))
-
-static void FillSurface(uint32_t *pixels, uint32_t color) {
-    if (!pixels) return;
-    for (int i = 0; i < DS_WIDTH * DS_HEIGHT; ++i) {
-        pixels[i] = color;
-    }
-}
-
-static void FillRect(uint32_t *pixels, int x, int y, int w, int h, uint32_t color) {
-    if (!pixels || w <= 0 || h <= 0) return;
-    int x0 = (x < 0) ? 0 : x;
-    int y0 = (y < 0) ? 0 : y;
-    int x1 = (x + w > DS_WIDTH) ? DS_WIDTH : x + w;
-    int y1 = (y + h > DS_HEIGHT) ? DS_HEIGHT : y + h;
-    for (int py = y0; py < y1; ++py) {
-        uint32_t *row = &pixels[py * DS_WIDTH];
-        for (int px = x0; px < x1; ++px) {
-            row[px] = color;
-        }
-    }
-}
-
-static void RenderFieldPlaceholder(void) {
-    s_frame_counter++;
-
-    for (int y = 0; y < DS_HEIGHT; ++y) {
-        uint8_t r = (uint8_t)(14 + (y * 20 / DS_HEIGHT));
-        uint8_t g = (uint8_t)(90 + (y * 70 / DS_HEIGHT));
-        uint8_t b = (uint8_t)(40 + (y * 20 / DS_HEIGHT));
-        uint32_t color = RGBA(r, g, b, 255);
-        for (int x = 0; x < DS_WIDTH; ++x) {
-            s_main_pixels[y * DS_WIDTH + x] = color;
-        }
-    }
-
-    for (int y = 0; y < DS_HEIGHT; y += 16) {
-        FillRect(s_main_pixels, 0, y, DS_WIDTH, 1, RGBA(35, 130, 60, 255));
-    }
-    for (int x = 0; x < DS_WIDTH; x += 16) {
-        FillRect(s_main_pixels, x, 0, 1, DS_HEIGHT, RGBA(35, 130, 60, 255));
-    }
-
-    FillRect(s_main_pixels, s_player_x - 4, s_player_y - 4, 9, 9, RGBA(255, 240, 80, 255));
-    FillRect(s_main_pixels, s_player_x - 2, s_player_y - 2, 5, 5, RGBA(255, 90, 40, 255));
-
-    FillSurface(s_sub_pixels, RGBA(20, 25, 45, 255));
-    FillRect(s_sub_pixels, 16, 16, DS_WIDTH - 32, 32, RGBA(45, 55, 90, 255));
-    FillRect(s_sub_pixels, 16, 60, DS_WIDTH - 32, 32, RGBA(45, 55, 90, 255));
-    FillRect(s_sub_pixels, 16, 104, DS_WIDTH - 32, 72, RGBA(30, 36, 62, 255));
-    FillRect(s_sub_pixels, 24, 116, 48, 48, RGBA(70, 90, 160, 255));
-    FillRect(s_sub_pixels, 184, 116, 48, 48, RGBA(150, 70, 90, 255));
-}
-
 static void EnterTitleState(void) {
     s_game_state = GAME_STATE_TITLE;
     s_prev_input_held = 0;
+    SceneField_Shutdown();
     SceneTitle_Init(&s_asset_store, s_main_surf);
     memset(s_sub_pixels, 0, sizeof(s_sub_pixels));
 }
 
 static void EnterFieldState(void) {
     s_game_state = GAME_STATE_FIELD_PLACEHOLDER;
-    s_player_x = DS_WIDTH / 2;
-    s_player_y = DS_HEIGHT / 2;
-    s_frame_counter = 0;
+    SceneField_Init(&s_asset_store, s_main_surf, s_sub_surf);
 }
 
 JNIEXPORT void JNICALL
@@ -145,6 +88,7 @@ Java_com_game_pokeplatinum_MainActivity_nativeInit(JNIEnv *env, jclass clazz, js
 JNIEXPORT void JNICALL
 Java_com_game_pokeplatinum_MainActivity_nativeShutdown(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
+    SceneField_Shutdown();
     SceneTitle_Shutdown();
     PspAssetStore_Shutdown(&s_asset_store);
 }
@@ -166,23 +110,10 @@ Java_com_game_pokeplatinum_MainActivity_nativeUpdate(JNIEnv *env, jclass clazz,
         return;
     }
 
-    const int speed = 2;
-    if (s_current_input_held & PAL_BUTTON_LEFT)  s_player_x -= speed;
-    if (s_current_input_held & PAL_BUTTON_RIGHT) s_player_x += speed;
-    if (s_current_input_held & PAL_BUTTON_UP)    s_player_y -= speed;
-    if (s_current_input_held & PAL_BUTTON_DOWN)  s_player_y += speed;
-
-    if (s_player_x < 4) s_player_x = 4;
-    if (s_player_y < 4) s_player_y = 4;
-    if (s_player_x > DS_WIDTH - 5) s_player_x = DS_WIDTH - 5;
-    if (s_player_y > DS_HEIGHT - 5) s_player_y = DS_HEIGHT - 5;
-
-    if ((pressed & PAL_BUTTON_START) || (pressed & PAL_BUTTON_B)) {
+    SceneFieldResult field = SceneField_Update(s_main_surf, s_sub_surf, s_current_input_held, pressed);
+    if (field == SCENE_FIELD_BACK_TO_TITLE) {
         EnterTitleState();
-        return;
     }
-
-    RenderFieldPlaceholder();
 }
 
 JNIEXPORT void JNICALL

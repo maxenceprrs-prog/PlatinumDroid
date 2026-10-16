@@ -76,6 +76,7 @@ fi
 NATIVE_SOURCES=(
   "$APP_DIR/cpp/jni_bridge.c"
   "$APP_DIR/cpp/scene_title.c"
+  "$APP_DIR/cpp/scene_field.c"
   "$APP_DIR/cpp/nds_gfx.c"
   "$APP_DIR/cpp/nds_sprite.c"
   "$APP_DIR/cpp/psp_asset_loader.c"
@@ -123,8 +124,12 @@ $BUILD_TOOLS/d8 "$BUILD_DIR/obj/com/game/pokeplatinum"/*.class \
 echo "==> 7. Copie des assets..."
 if [[ -d "$APP_DIR/assets" ]]; then
   cp -r "$APP_DIR/assets/." "$BUILD_DIR/apk/assets/"
+elif [[ -d "$PROJECT_DIR/../psp-assets" ]]; then
+  mkdir -p "$BUILD_DIR/apk/assets/psp-assets"
+  cp -r "$PROJECT_DIR/../psp-assets/." "$BUILD_DIR/apk/assets/psp-assets/"
+  echo "    assets copiés depuis $PROJECT_DIR/../psp-assets"
 else
-  echo "[WARN] Dossier assets absent: $APP_DIR/assets (APK créé sans assets supplémentaires)."
+  echo "[WARN] Aucun dossier assets trouvé ($APP_DIR/assets ou $PROJECT_DIR/../psp-assets)."
 fi
 
 echo "==> 8. Packaging APK initial (aapt)..."
