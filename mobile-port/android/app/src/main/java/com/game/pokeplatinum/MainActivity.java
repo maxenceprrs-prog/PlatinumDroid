@@ -21,6 +21,13 @@ import java.io.InputStream;
 import java.io.OutputStream;
 
 public class MainActivity extends Activity {
+    private static final int PAL_BUTTON_A = 1 << 0;
+    private static final int PAL_BUTTON_B = 1 << 1;
+    private static final int PAL_BUTTON_START = 1 << 3;
+    private static final int PAL_BUTTON_RIGHT = 1 << 4;
+    private static final int PAL_BUTTON_LEFT = 1 << 5;
+    private static final int PAL_BUTTON_UP = 1 << 6;
+    private static final int PAL_BUTTON_DOWN = 1 << 7;
 
     static {
         System.loadLibrary("pokeplatinum");
@@ -115,11 +122,29 @@ public class MainActivity extends Activity {
         private int touchX = 0, touchY = 0;
         private boolean touchDown = false;
 
+        private final Paint controlFillPaint = new Paint();
+        private final Paint controlStrokePaint = new Paint();
+        private final Paint controlTextPaint = new Paint();
+
         public GameView(Context context) {
             super(context);
             holder = getHolder();
             topBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
             bottomBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
+
+            controlFillPaint.setColor(Color.argb(90, 40, 80, 180));
+            controlFillPaint.setStyle(Paint.Style.FILL);
+            controlFillPaint.setAntiAlias(true);
+
+            controlStrokePaint.setColor(Color.argb(180, 200, 220, 255));
+            controlStrokePaint.setStyle(Paint.Style.STROKE);
+            controlStrokePaint.setStrokeWidth(3f);
+            controlStrokePaint.setAntiAlias(true);
+
+            controlTextPaint.setColor(Color.argb(220, 255, 255, 255));
+            controlTextPaint.setTextSize(32f);
+            controlTextPaint.setTextAlign(Paint.Align.CENTER);
+            controlTextPaint.setAntiAlias(true);
         }
 
         public void resume() {
@@ -139,36 +164,117 @@ public class MainActivity extends Activity {
 
         @Override
         public boolean onTouchEvent(MotionEvent event) {
+            updateInputFromTouchEvent(event);
+            return true;
+        }
+
+        private boolean isPointerActive(MotionEvent event, int pointerIndex) {
             int action = event.getActionMasked();
-            float x = event.getX();
-            float y = event.getY();
+            int actionIndex = event.getActionIndex();
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP || action == MotionEvent.ACTION_CANCEL) {
+                return pointerIndex != actionIndex;
+            }
+            return true;
+        }
 
-            int viewW = getWidth();
-            int viewH = getHeight();
-            int screenH = (int)(256.0f * ((float)viewW / 256.0f) * (192.0f / 256.0f));
+        private void updateInputFromTouchEvent(MotionEvent event) {
+            int viewW = Math.max(getWidth(), 1);
+            int viewH = Math.max(getHeight(), 1);
+            float scale = (float) viewW / 256.0f;
+            int scaledH = (int) (192.0f * scale);
             int gap = 16;
-            int totalH = screenH * 2 + gap;
+            int totalH = scaledH * 2 + gap;
             int offsetY = (viewH - totalH) / 2;
-            int bottomY = offsetY + screenH + gap;
+            if (offsetY < 0) offsetY = 0;
+            int bottomY = offsetY + scaledH + gap;
 
-            if (y >= bottomY && y <= bottomY + screenH) {
-                touchDown = (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_MOVE);
-                touchX = (int)((x / viewW) * 256.0f);
-                touchY = (int)(((y - bottomY) / screenH) * 192.0f);
-            } else {
-                touchDown = false;
-                /* Touch sur l'écran du haut ou bord = action A / Start */
-                if (action == MotionEvent.ACTION_DOWN) {
-                    inputFlags |= 1; /* A button */
-                } else if (action == MotionEvent.ACTION_UP) {
-                    inputFlags &= ~1;
+            int nextFlags = 0;
+            boolean nextTouchDown = false;
+            int nextTouchX = touchX;
+            int nextTouchY = touchY;
+
+            for (int i = 0; i < event.getPointerCount(); i++) {
+                if (!isPointerActive(event, i)) continue;
+                float x = event.getX(i);
+                float y = event.getY(i);
+
+                if (y >= bottomY && y <= bottomY + scaledH) {
+                    nextTouchDown = true;
+                    nextTouchX = clamp((int) ((x / viewW) * 256.0f), 0, 255);
+                    nextTouchY = clamp((int) (((y - bottomY) / scaledH) * 192.0f), 0, 191);
+                    continue;
+                }
+
+                if (y < viewH * 0.16f) {
+                    nextFlags |= PAL_BUTTON_START;
+                }
+
+                if (x < viewW * 0.42f && y > viewH * 0.48f) {
+                    float cx = viewW * 0.20f;
+                    float cy = viewH * 0.76f;
+                    float dx = x - cx;
+                    float dy = y - cy;
+                    if (Math.abs(dx) > Math.abs(dy)) {
+                        nextFlags |= (dx < 0.0f) ? PAL_BUTTON_LEFT : PAL_BUTTON_RIGHT;
+                    } else {
+                        nextFlags |= (dy < 0.0f) ? PAL_BUTTON_UP : PAL_BUTTON_DOWN;
+                    }
+                }
+
+                if (x > viewW * 0.58f && y > viewH * 0.50f) {
+                    if (y < viewH * 0.75f) {
+                        nextFlags |= PAL_BUTTON_A;
+                    } else {
+                        nextFlags |= PAL_BUTTON_B;
+                    }
                 }
             }
 
-            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
-                touchDown = false;
+            if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                nextFlags = 0;
+                nextTouchDown = false;
             }
-            return true;
+
+            inputFlags = nextFlags;
+            touchDown = nextTouchDown;
+            touchX = nextTouchX;
+            touchY = nextTouchY;
+        }
+
+        private int clamp(int value, int min, int max) {
+            if (value < min) return min;
+            if (value > max) return max;
+            return value;
+        }
+
+        private void drawControlsOverlay(Canvas canvas, int w, int h) {
+            float dpadCx = w * 0.20f;
+            float dpadCy = h * 0.76f;
+            float dpadR = Math.min(w, h) * 0.085f;
+            canvas.drawCircle(dpadCx, dpadCy, dpadR, controlFillPaint);
+            canvas.drawCircle(dpadCx, dpadCy, dpadR, controlStrokePaint);
+
+            float aCx = w * 0.80f;
+            float aCy = h * 0.67f;
+            float bCx = w * 0.70f;
+            float bCy = h * 0.80f;
+            float btnR = Math.min(w, h) * 0.060f;
+
+            canvas.drawCircle(aCx, aCy, btnR, controlFillPaint);
+            canvas.drawCircle(aCx, aCy, btnR, controlStrokePaint);
+            canvas.drawText("A", aCx, aCy + 11f, controlTextPaint);
+
+            canvas.drawCircle(bCx, bCy, btnR, controlFillPaint);
+            canvas.drawCircle(bCx, bCy, btnR, controlStrokePaint);
+            canvas.drawText("B", bCx, bCy + 11f, controlTextPaint);
+
+            float startW = Math.max(120f, w * 0.24f);
+            float startH = Math.max(44f, h * 0.06f);
+            Rect startRect = new Rect((int) (w * 0.5f - startW / 2f), (int) (h * 0.04f),
+                    (int) (w * 0.5f + startW / 2f), (int) (h * 0.04f + startH));
+            canvas.drawRect(startRect, controlFillPaint);
+            canvas.drawRect(startRect, controlStrokePaint);
+            canvas.drawText("START", startRect.exactCenterX(), startRect.exactCenterY() + 11f, controlTextPaint);
         }
 
         @Override
@@ -204,6 +310,7 @@ public class MainActivity extends Activity {
 
                     canvas.drawBitmap(topBitmap, null, dstTop, paint);
                     canvas.drawBitmap(bottomBitmap, null, dstBottom, paint);
+                    drawControlsOverlay(canvas, w, h);
 
                     holder.unlockCanvasAndPost(canvas);
                 }
