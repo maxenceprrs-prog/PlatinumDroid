@@ -1,0 +1,41 @@
+# Assets et ROMs du jeu
+psp-assets/
+ppsspp_game/
+*.nds
+*.iso
+*.cso
+*.pbp
+*.narc
+baserom*
+
+# Archives et images d?cod?es
+*.zip
+decode_*.png
+exemple_decode_*.png
+
+# Projets externes (? ajouter en sous-module)
+pokeplatinum-main/
+pspoke/
+
+# Builds
+build_psp/
+*.o
+*.elf
+*.prx
+*.sfo
+*.apk
+.gradle/
+.idea/
+local.properties
+
+# Builds Android / CMake
+mobile-port/build/
+mobile-port/android/build/
+**/build/
+*.idsig
+*.keystore
+*.jks
+*.dex
+*.class
+*.so
+a.out
