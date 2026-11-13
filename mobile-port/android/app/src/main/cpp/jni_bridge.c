@@ -18,6 +18,8 @@ static PspAssetStore s_asset_store;
 static PAL_Surface*  s_main_surf = NULL;
 static PAL_Surface*  s_sub_surf = NULL;
 static u32           s_current_input = 0;
+static u32           s_last_input = 0;
+static int           s_repeat_counter = 0;
 
 /* Structure interne PAL_Surface identique à scene_title.c */
 typedef struct {
@@ -54,6 +56,9 @@ Java_com_game_pokeplatinum_MainActivity_nativeInit(JNIEnv *env, jclass clazz, js
     s_main_surf = (PAL_Surface*)&s_main_internal;
     s_sub_surf = (PAL_Surface*)&s_sub_internal;
 
+    s_last_input = 0;
+    s_repeat_counter = 0;
+
     PspAssetStore_Init(&s_asset_store, path);
     (*env)->ReleaseStringUTFChars(env, asset_root, path);
 
@@ -72,7 +77,29 @@ Java_com_game_pokeplatinum_MainActivity_nativeUpdate(JNIEnv *env, jclass clazz,
                                                      jint input_flags, jint touch_x, jint touch_y, jboolean touch_down) {
     (void)env; (void)clazz; (void)touch_x; (void)touch_y; (void)touch_down;
 
-    s_current_input = (u32)input_flags;
+    u32 held = (u32)input_flags;
+    u32 just_pressed = held & ~s_last_input;
+    u32 dir_mask = PAL_BUTTON_UP | PAL_BUTTON_DOWN | PAL_BUTTON_LEFT | PAL_BUTTON_RIGHT;
+
+    u32 to_send = just_pressed;
+
+    /* Auto-repeat pour la navigation fluide dans les menus */
+    if (held & dir_mask) {
+        if ((s_last_input & dir_mask) == (held & dir_mask)) {
+            s_repeat_counter++;
+            if (s_repeat_counter > 25 && (s_repeat_counter % 8) == 0) {
+                to_send |= (held & dir_mask);
+            }
+        } else {
+            s_repeat_counter = 0;
+        }
+    } else {
+        s_repeat_counter = 0;
+    }
+
+    s_last_input = held;
+    s_current_input = to_send;
+
     SceneTitle_Update(s_main_surf, s_current_input);
 }
 
