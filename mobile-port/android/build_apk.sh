@@ -65,6 +65,8 @@ echo "    libpokeplatinum.so (x86_64) OK !"
 # ---------------------------------------------------------------------------
 echo "==> 4. Génération de R.java via aapt..."
 $BUILD_TOOLS/aapt package -m \
+    --min-sdk-version 24 \
+    --target-sdk-version 34 \
     -J "$BUILD_DIR/gen" \
     -M "$APP_DIR/AndroidManifest.xml" \
     -S "$APP_DIR/res" \
@@ -91,6 +93,8 @@ cp -r "$APP_DIR/assets/"* "$BUILD_DIR/apk/assets/"
 # ---------------------------------------------------------------------------
 echo "==> 8. Packaging APK initial (aapt)..."
 $BUILD_TOOLS/aapt package -f \
+    --min-sdk-version 24 \
+    --target-sdk-version 34 \
     -M "$APP_DIR/AndroidManifest.xml" \
     -S "$APP_DIR/res" \
     -I "$PLATFORM" \
