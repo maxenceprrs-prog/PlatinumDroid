@@ -46,6 +46,14 @@ public class MainActivity extends Activity {
                 WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
 
+        /* 0. Demande des permissions de lecture pour la ROM sur carte SD / stockage */
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
+                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+                requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE}, 100);
+            }
+        }
+
         /* 1. Extraire les assets (y compris audio_wav) vers le dossier interne */
         copyAssetsToFilesDir(this, "psp-assets");
 
@@ -56,10 +64,7 @@ public class MainActivity extends Activity {
         /* 3. Init AudioTrack + mixer C */
         initAudio();
 
-        /* 4. Démarrer la musique de fond avec un des WAVs extraits du SDAT */
-        startInitialMusic();
-
-        /* 5. Afficher la vue de jeu */
+        /* 4. Afficher la vue de jeu */
         gameView = new GameView(this);
         setContentView(gameView);
     }
@@ -83,24 +88,10 @@ public class MainActivity extends Activity {
 
             nativeAudioInit(audioTrack);
             Log.i(TAG, "AudioTrack initialisé avec succès");
+            /* Lancement de la musique du menu Platine (BGM_TRACK_TITLE = 1) */
+            nativeAudioPlayBgm(1);
         } catch (Exception e) {
             Log.e(TAG, "Erreur initialisation audio", e);
-        }
-    }
-
-    private void startInitialMusic() {
-        try {
-            File wavDir = new File(getFilesDir(), "psp-assets/audio_wav");
-            if (wavDir.exists() && wavDir.isDirectory()) {
-                File[] list = wavDir.listFiles((d, name) -> name.endsWith(".wav"));
-                if (list != null && list.length > 0) {
-                    File target = list[0];
-                    Log.i(TAG, "Lancement audio : " + target.getAbsolutePath());
-                    nativeAudioSetSource(target.getAbsolutePath(), true);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Erreur démarrage musique", e);
         }
     }
 
@@ -143,6 +134,7 @@ public class MainActivity extends Activity {
     public static native void nativeAudioInit(AudioTrack track);
     public static native void nativeAudioShutdown();
     public static native void nativeAudioSetSource(String wavPath, boolean loop);
+    public static native void nativeAudioPlayBgm(int trackId);
 
     /* ---------------------------------------------------------------- */
     /* Copie récursive des assets                                       */
@@ -311,21 +303,24 @@ public class MainActivity extends Activity {
                 float px = event.getX(i);
                 float py = event.getY(i);
 
-                /* 1. Écran DS inférieur (stylet tactile) */
+                /* 1. Écran DS inférieur (stylet tactile / Pokétch) */
                 if (py >= bottomY && py <= bottomEndY) {
                     newTouchDown = true;
                     newTouchX = (int)Math.max(0, Math.min(255, (px / w) * 256.0f));
                     newTouchY = (int)Math.max(0, Math.min(191, ((py - bottomY) / (float)scaledH) * 192.0f));
                 }
-                /* 2. Écran DS supérieur (tap = bouton A d'appoint) */
+                /* 2. Écran DS supérieur (toucher direct pour options menu et dialogues) */
                 else if (py >= topY && py < bottomY) {
+                    newTouchDown = true;
+                    newTouchX = (int)Math.max(0, Math.min(255, (px / w) * 256.0f));
+                    newTouchY = (int)Math.max(0, Math.min(191, ((py - topY) / (float)scaledH) * 192.0f));
                     newFlags |= PAL_BUTTON_A;
                 }
                 /* 3. Zone manette (boutons et joystick) */
                 else if (py >= btnTopY) {
                     /* Joystick tactile (partie gauche) */
                     float distStick = dist(px, py, stickBaseX, stickBaseY);
-                    if (distStick <= stickRadius * 1.6f || (stickActive && px < w * 0.45f)) {
+                    if (distStick <= stickRadius * 2.0f || (stickActive && px < w * 0.50f)) {
                         stickFound = true;
                         float dx = px - stickBaseX;
                         float dy = py - stickBaseY;
@@ -337,8 +332,8 @@ public class MainActivity extends Activity {
                         stickKnobX = stickBaseX + dx;
                         stickKnobY = stickBaseY + dy;
 
-                        /* Deadzone (25% du rayon) */
-                        if (len > stickRadius * 0.25f) {
+                        /* Deadzone (18% du rayon) - réactivité instantanée */
+                        if (len > stickRadius * 0.18f) {
                             double angle = Math.toDegrees(Math.atan2(dy, dx)); // -180 à 180
                             // 8 directions (angles)
                             if (angle >= -157.5 && angle <= -22.5)  newFlags |= PAL_BUTTON_UP;
@@ -348,21 +343,21 @@ public class MainActivity extends Activity {
                         }
                     }
 
-                    /* Boutons A, B, X, Y */
-                    if (dist(px, py, aX, aY) <= btnRadius * 1.3f) newFlags |= PAL_BUTTON_A;
-                    if (dist(px, py, bX, bY) <= btnRadius * 1.3f) newFlags |= PAL_BUTTON_B;
-                    if (dist(px, py, xX, xY) <= btnRadius * 1.3f) newFlags |= PAL_BUTTON_X;
-                    if (dist(px, py, yX, yY) <= btnRadius * 1.3f) newFlags |= PAL_BUTTON_Y;
+                    /* Boutons A, B, X, Y avec tolérance tactile étendue */
+                    if (dist(px, py, aX, aY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_A;
+                    if (dist(px, py, bX, bY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_B;
+                    if (dist(px, py, xX, xY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_X;
+                    if (dist(px, py, yX, yY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_Y;
 
                     /* Boutons START / SELECT */
-                    if (dist(px, py, selX, selY) <= smR * 1.3f) newFlags |= PAL_BUTTON_SELECT;
-                    if (dist(px, py, staX, staY) <= smR * 1.3f) newFlags |= PAL_BUTTON_START;
+                    if (dist(px, py, selX, selY) <= smR * 1.5f) newFlags |= PAL_BUTTON_SELECT;
+                    if (dist(px, py, staX, staY) <= smR * 1.5f) newFlags |= PAL_BUTTON_START;
 
                     /* Gâchettes L / R */
-                    if (Math.abs(px - lBtnX) <= shoulderW && Math.abs(py - lBtnY) <= shoulderH) {
+                    if (Math.abs(px - lBtnX) <= shoulderW * 1.2f && Math.abs(py - lBtnY) <= shoulderH * 1.2f) {
                         newFlags |= PAL_BUTTON_L;
                     }
-                    if (Math.abs(px - rBtnX) <= shoulderW && Math.abs(py - rBtnY) <= shoulderH) {
+                    if (Math.abs(px - rBtnX) <= shoulderW * 1.2f && Math.abs(py - rBtnY) <= shoulderH * 1.2f) {
                         newFlags |= PAL_BUTTON_R;
                     }
                 }

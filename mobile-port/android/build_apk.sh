@@ -30,6 +30,7 @@ echo "==> 2. Compilation des bibliothèques C natives (ARM64-v8a)..."
     -I"$CPP" \
     "$CPP/jni_bridge.c" \
     "$CPP/scene_title.c" \
+    "$CPP/scene_game.c" \
     "$CPP/nds_gfx.c" \
     "$CPP/nds_sprite.c" \
     "$CPP/psp_asset_loader.c" \
@@ -37,6 +38,8 @@ echo "==> 2. Compilation des bibliothèques C natives (ARM64-v8a)..."
     "$CPP/pal_graphics_android.c" \
     "$CPP/audio_assets.c" \
     "$CPP/audio_sdat.c" \
+    "$CPP/bgm_synth.c" \
+    "$CPP/rom_reader.c" \
     "$CPP/pal_audio_android.c" \
     -llog -landroid -lm \
     -o "$BUILD_DIR/apk/lib/arm64-v8a/libpokeplatinum.so"
@@ -50,6 +53,7 @@ echo "==> 3. Compilation des bibliothèques C natives (x86_64)..."
     -I"$CPP" \
     "$CPP/jni_bridge.c" \
     "$CPP/scene_title.c" \
+    "$CPP/scene_game.c" \
     "$CPP/nds_gfx.c" \
     "$CPP/nds_sprite.c" \
     "$CPP/psp_asset_loader.c" \
@@ -57,6 +61,8 @@ echo "==> 3. Compilation des bibliothèques C natives (x86_64)..."
     "$CPP/pal_graphics_android.c" \
     "$CPP/audio_assets.c" \
     "$CPP/audio_sdat.c" \
+    "$CPP/bgm_synth.c" \
+    "$CPP/rom_reader.c" \
     "$CPP/pal_audio_android.c" \
     -llog -landroid -lm \
     -o "$BUILD_DIR/apk/lib/x86_64/libpokeplatinum.so"

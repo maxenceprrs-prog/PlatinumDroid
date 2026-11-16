@@ -28,7 +28,8 @@ int  SceneTitle_Init(PspAssetStore *store, PAL_Surface *screen);
 
 /* À appeler à chaque frame. Dessine + lit les entrées.
  * Retourne un SceneTitleResult. */
-SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed);
+SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed,
+                                  int touch_x, int touch_y, int touch_down);
 
 /* Libère les ressources internes (rien d'alloué pour l'instant). */
 void SceneTitle_Shutdown(void);

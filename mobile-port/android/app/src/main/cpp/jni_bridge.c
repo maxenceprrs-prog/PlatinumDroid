@@ -9,11 +9,19 @@
 #include "platform/pal_graphics.h"
 #include "platform/pal_input.h"
 #include "scene_title.h"
+#include "scene_game.h"
 #include "psp_asset_loader.h"
+#include "bgm_synth.h"
 
 #define DS_WIDTH  256
 #define DS_HEIGHT 192
 
+enum {
+    SCENE_MODE_TITLE = 0,
+    SCENE_MODE_GAME  = 1
+};
+
+static int           s_active_scene = SCENE_MODE_TITLE;
 static PspAssetStore s_asset_store;
 static PAL_Surface*  s_main_surf = NULL;
 static PAL_Surface*  s_sub_surf = NULL;
@@ -63,19 +71,22 @@ Java_com_game_pokeplatinum_MainActivity_nativeInit(JNIEnv *env, jclass clazz, js
     (*env)->ReleaseStringUTFChars(env, asset_root, path);
 
     SceneTitle_Init(&s_asset_store, s_main_surf);
+    BgmSynth_PlayTrack(BGM_TRACK_TITLE);
 }
 
 JNIEXPORT void JNICALL
 Java_com_game_pokeplatinum_MainActivity_nativeShutdown(JNIEnv *env, jclass clazz) {
     (void)env; (void)clazz;
+    BgmSynth_Stop();
     SceneTitle_Shutdown();
+    SceneGame_Shutdown();
     PspAssetStore_Shutdown(&s_asset_store);
 }
 
 JNIEXPORT void JNICALL
 Java_com_game_pokeplatinum_MainActivity_nativeUpdate(JNIEnv *env, jclass clazz,
                                                      jint input_flags, jint touch_x, jint touch_y, jboolean touch_down) {
-    (void)env; (void)clazz; (void)touch_x; (void)touch_y; (void)touch_down;
+    (void)env; (void)clazz;
 
     u32 held = (u32)input_flags;
     u32 just_pressed = held & ~s_last_input;
@@ -100,7 +111,16 @@ Java_com_game_pokeplatinum_MainActivity_nativeUpdate(JNIEnv *env, jclass clazz,
     s_last_input = held;
     s_current_input = to_send;
 
-    SceneTitle_Update(s_main_surf, s_current_input);
+    if (s_active_scene == SCENE_MODE_TITLE) {
+        SceneTitleResult res = SceneTitle_Update(s_main_surf, s_current_input, touch_x, touch_y, touch_down);
+        if (res == SCENE_TITLE_NEW_GAME || res == SCENE_TITLE_CONTINUE) {
+            s_active_scene = SCENE_MODE_GAME;
+            SceneGame_Init(&s_asset_store, s_main_surf, s_sub_surf, (res == SCENE_TITLE_NEW_GAME));
+            BgmSynth_PlayTrack(BGM_TRACK_TWINLEAF);
+        }
+    } else if (s_active_scene == SCENE_MODE_GAME) {
+        SceneGame_Update(s_main_surf, s_sub_surf, to_send, held, touch_x, touch_y, touch_down);
+    }
 }
 
 JNIEXPORT void JNICALL

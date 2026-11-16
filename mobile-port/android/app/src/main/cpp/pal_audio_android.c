@@ -16,6 +16,7 @@
 #include "platform/pal_audio.h"
 #include "audio_assets.h"
 #include "audio_sdat.h"
+#include "bgm_synth.h"
 #include <android/log.h>
 #include <stdlib.h>
 #include <string.h>
@@ -209,6 +210,26 @@ void PAL_Audio_PlayMusic(PAL_AudioHandle music, BOOL loop) {
     LOGI("PAL_Audio_PlayMusic: %zu samples, loop=%d", buf->num_samples, loop);
 }
 
+void PAL_Audio_StopMusic(PAL_AudioHandle music) {
+    (void)music;
+    pthread_mutex_lock(&s_audio.lock);
+    s_audio.src_samples = NULL;
+    s_audio.src_total   = 0;
+    s_audio.src_pos     = 0;
+    pthread_mutex_unlock(&s_audio.lock);
+}
+
+void PAL_Audio_FreeMusic(PAL_AudioHandle music) {
+    if (!music) return;
+    WavBuffer *buf = (WavBuffer *)music;
+    AudioAssets_Free(buf);
+    free(buf);
+}
+
+void PAL_Audio_SetVolume(float volume) {
+    (void)volume;
+}
+
 /* ================================================================== */
 /* JNI Entry Points (appelés depuis MainActivity.java)                */
 /* ================================================================== */
@@ -279,4 +300,15 @@ Java_com_game_pokeplatinum_MainActivity_nativeAudioSetSource(
         /* Note : WavBuffer non libéré ici — vivra jusqu'au shutdown */
         /* En production, implémenter un gestionnaire de handles */
     }
+}
+
+/**
+ * nativeAudioPlayBgm(int trackId)
+ * Joue une musique synthétisée DS en continu
+ */
+JNIEXPORT void JNICALL
+Java_com_game_pokeplatinum_MainActivity_nativeAudioPlayBgm(
+        JNIEnv *env, jclass clazz, jint track_id) {
+    (void)env; (void)clazz;
+    BgmSynth_PlayTrack((BgmTrack)track_id);
 }

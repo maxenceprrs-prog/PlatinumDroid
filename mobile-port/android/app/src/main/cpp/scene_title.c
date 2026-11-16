@@ -330,7 +330,8 @@ static void DrawTitle(void) {
 /* ------------------------------------------------------------------ */
 /* SceneTitle_Update                                                  */
 /* ------------------------------------------------------------------ */
-SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed) {
+SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed,
+                                  int touch_x, int touch_y, int touch_down) {
     s_frame++;
     s_blink_tick++;
     if (s_blink_tick >= 60) s_blink_tick = 0;
@@ -339,7 +340,21 @@ SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed) {
     s_surf_internal = (PAL_SurfaceInternal *)screen;
     s_pixels        = s_surf_internal->pixels;
 
-    /* --- Navigation --- */
+    /* --- Gestion Tactile direct sur le menu --- */
+    if (touch_down && touch_x >= 20 && touch_x <= 236) {
+        if (touch_y >= 90 && touch_y < 104) {
+            s_cursor = 0;
+            return SCENE_TITLE_CONTINUE;
+        } else if (touch_y >= 104 && touch_y < 118) {
+            s_cursor = 1;
+            return SCENE_TITLE_NEW_GAME;
+        } else if (touch_y >= 118 && touch_y < 134) {
+            s_cursor = 2;
+            return SCENE_TITLE_OPTIONS;
+        }
+    }
+
+    /* --- Navigation manette / boutons --- */
     if (pressed & PAL_BUTTON_UP) {
         s_cursor--;
         if (s_cursor < 0) s_cursor = s_menu_count - 1;
@@ -351,7 +366,12 @@ SceneTitleResult SceneTitle_Update(PAL_Surface *screen, u32 pressed) {
         s_blink_tick = 0;
     }
     if (pressed & PAL_BUTTON_START) {
-        return SCENE_TITLE_QUIT;
+        /* START valide l'option sélectionnée pour plus de confort mobile */
+        switch (s_cursor) {
+            case 0: return SCENE_TITLE_CONTINUE;
+            case 1: return SCENE_TITLE_NEW_GAME;
+            case 2: return SCENE_TITLE_OPTIONS;
+        }
     }
     if ((pressed & PAL_BUTTON_A) || (pressed & PAL_BUTTON_X)) {
         switch (s_cursor) {
