@@ -19,6 +19,8 @@ static uint8_t    *s_fat_table = NULL;
 static uint32_t    s_num_fat_entries = 0;
 
 static const char *s_default_rom_paths[] = {
+    "/sdcard/Android/data/com.game.pokeplatinum/files/PokemonPlatinum.nds",
+    "/storage/emulated/0/Android/data/com.game.pokeplatinum/files/PokemonPlatinum.nds",
     "/sdcard/Download/PokemonPlatinum.nds",
     "/sdcard/Download/Pokemon - Platinum Version (USA) (Rev 1).nds",
     "/sdcard/Download/Pokemon - Platinum Version.nds",
