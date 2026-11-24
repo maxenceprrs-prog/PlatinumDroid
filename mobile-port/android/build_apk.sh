@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # ===========================================================================
-# build_apk.sh — Génération de l'APK PokemonPlatinum pour Android
+# build_apk.sh — Packaging APK Pokémon Platine autonome avec cœur melonDS NDK
 # ===========================================================================
 set -e
 
@@ -13,62 +13,35 @@ PROJECT_DIR="/mnt/c/Users/philippe/Music/Pokemon psp/mobile-port/android"
 APP_DIR="$PROJECT_DIR/app/src/main"
 CPP="$APP_DIR/cpp"
 BUILD_DIR="$PROJECT_DIR/build"
+MELONDS_LIBS="/opt/melonds_core/libs/arm64-v8a"
 
 # ---------------------------------------------------------------------------
 echo "==> 1. Nettoyage et préparation des dossiers de build..."
 rm -rf "$BUILD_DIR"
 mkdir -p "$BUILD_DIR/gen" "$BUILD_DIR/obj" \
          "$BUILD_DIR/apk/lib/arm64-v8a" \
-         "$BUILD_DIR/apk/lib/x86_64" \
          "$BUILD_DIR/apk/assets"
 
 # ---------------------------------------------------------------------------
-echo "==> 2. Compilation des bibliothèques C natives (ARM64-v8a)..."
+echo "==> 2. Intégration du cœur natif melonDS (libretro.so ARM64)..."
+if [ ! -f "$MELONDS_LIBS/libretro.so" ]; then
+    echo "ERREUR: $MELONDS_LIBS/libretro.so introuvable !"
+    exit 1
+fi
+cp "$MELONDS_LIBS/libretro.so" "$BUILD_DIR/apk/lib/arm64-v8a/libretro.so"
+echo "    libretro.so copié dans l'APK !"
+
+# ---------------------------------------------------------------------------
+echo "==> 3. Compilation du pont JNI melonDS (libpokeplatinum.so ARM64)..."
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" \
     -O2 -fPIC -shared \
     -I"$CPP/include" \
-    -I"$CPP" \
-    "$CPP/jni_bridge.c" \
-    "$CPP/scene_title.c" \
-    "$CPP/scene_game.c" \
-    "$CPP/nds_gfx.c" \
-    "$CPP/nds_sprite.c" \
-    "$CPP/psp_asset_loader.c" \
-    "$CPP/psp_asset_renderer.c" \
-    "$CPP/pal_graphics_android.c" \
-    "$CPP/audio_assets.c" \
-    "$CPP/audio_sdat.c" \
-    "$CPP/bgm_synth.c" \
-    "$CPP/rom_reader.c" \
-    "$CPP/melonds_core.c" \
-    "$CPP/pal_audio_android.c" \
+    -I/opt/melonds_core/src/libretro/libretro-common/include \
+    "$CPP/melonds_bridge.c" \
+    -L"$MELONDS_LIBS" -lretro \
     -llog -landroid -lm \
     -o "$BUILD_DIR/apk/lib/arm64-v8a/libpokeplatinum.so"
-echo "    libpokeplatinum.so (ARM64) OK !"
-
-# ---------------------------------------------------------------------------
-echo "==> 3. Compilation des bibliothèques C natives (x86_64)..."
-"$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/x86_64-linux-android34-clang" \
-    -O2 -fPIC -shared \
-    -I"$CPP/include" \
-    -I"$CPP" \
-    "$CPP/jni_bridge.c" \
-    "$CPP/scene_title.c" \
-    "$CPP/scene_game.c" \
-    "$CPP/nds_gfx.c" \
-    "$CPP/nds_sprite.c" \
-    "$CPP/psp_asset_loader.c" \
-    "$CPP/psp_asset_renderer.c" \
-    "$CPP/pal_graphics_android.c" \
-    "$CPP/audio_assets.c" \
-    "$CPP/audio_sdat.c" \
-    "$CPP/bgm_synth.c" \
-    "$CPP/rom_reader.c" \
-    "$CPP/melonds_core.c" \
-    "$CPP/pal_audio_android.c" \
-    -llog -landroid -lm \
-    -o "$BUILD_DIR/apk/lib/x86_64/libpokeplatinum.so"
-echo "    libpokeplatinum.so (x86_64) OK !"
+echo "    libpokeplatinum.so compilé avec succès !"
 
 # ---------------------------------------------------------------------------
 echo "==> 4. Génération de R.java via aapt..."
@@ -81,22 +54,26 @@ $BUILD_TOOLS/aapt package -m \
     -I "$PLATFORM"
 
 # ---------------------------------------------------------------------------
-echo "==> 5. Compilation Java..."
+echo "==> 5. Compilation Java (MainActivity.java)..."
 javac -d "$BUILD_DIR/obj" \
     -classpath "$PLATFORM" \
     -source 1.8 -target 1.8 \
     "$BUILD_DIR/gen/com/game/pokeplatinum/R.java" \
     "$APP_DIR/java/com/game/pokeplatinum/MainActivity.java"
+echo "    Classes Java compilées avec succès !"
 
 # ---------------------------------------------------------------------------
 echo "==> 6. Création de classes.dex (d8)..."
 $BUILD_TOOLS/d8 "$BUILD_DIR/obj/com/game/pokeplatinum/"*.class \
     --lib "$PLATFORM" \
     --output "$BUILD_DIR/apk"
+echo "    classes.dex généré avec succès !"
 
 # ---------------------------------------------------------------------------
 echo "==> 7. Copie des assets..."
-cp -r "$APP_DIR/assets/"* "$BUILD_DIR/apk/assets/"
+if [ -d "$APP_DIR/assets" ]; then
+    cp -r "$APP_DIR/assets/"* "$BUILD_DIR/apk/assets/" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 echo "==> 8. Packaging APK initial (aapt)..."
@@ -136,7 +113,7 @@ $BUILD_TOOLS/apksigner sign \
 
 echo ""
 echo "=========================================================="
-echo " [SUCCES] APK Android genere avec succes !"
+echo " [SUCCES] APK Android avec vrai melonDS généré avec succès !"
 echo " Emplacement : $PROJECT_DIR/PokemonPlatinum_Release.apk"
 echo "=========================================================="
 ls -lh "$PROJECT_DIR/PokemonPlatinum_Release.apk"

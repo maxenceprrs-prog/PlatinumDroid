@@ -2,6 +2,7 @@ package com.game.pokeplatinum;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -11,13 +12,21 @@ import android.graphics.RectF;
 import android.media.AudioFormat;
 import android.media.AudioManager;
 import android.media.AudioTrack;
+import android.net.Uri;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
+import android.view.View;
 import android.view.Window;
 import android.view.WindowManager;
+import android.widget.Button;
+import android.widget.FrameLayout;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
@@ -28,15 +37,26 @@ public class MainActivity extends Activity {
     private static final String TAG = "PokePlatinum";
 
     static {
+        System.loadLibrary("retro");
         System.loadLibrary("pokeplatinum");
     }
 
-    private GameView   gameView;
-    private AudioTrack audioTrack;
+    /* Méthodes JNI du vrai cœur melonDS */
+    public static native boolean nativeInitEmulator(String romPath, String saveDir);
+    public static native boolean nativeRunFrame(int[] topPixels, int[] bottomPixels,
+                                               int inputMask, int touchX, int touchY, boolean isTouching);
+    public static native int nativeGetAudioSamples(short[] audioBuffer);
+    public static native void nativeShutdownEmulator();
 
-    /* ---------------------------------------------------------------- */
-    /* Lifecycle                                                         */
-    /* ---------------------------------------------------------------- */
+    private FrameLayout rootLayout;
+    private DSGameView gameView;
+    private AudioTrack audioTrack;
+    private Thread audioThread;
+    private volatile boolean isRunning = false;
+    private String loadedRomPath = null;
+
+    private static final int REQUEST_CODE_PICK_ROM = 1001;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
@@ -45,51 +65,186 @@ public class MainActivity extends Activity {
         getWindow().setFlags(
                 WindowManager.LayoutParams.FLAG_FULLSCREEN,
                 WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
-        /* 0. Demande des permissions de lecture pour la ROM sur carte SD / stockage */
+        /* Permissions stockage */
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            if (checkSelfPermission(android.Manifest.permission.READ_EXTERNAL_STORAGE)
-                    != android.content.pm.PackageManager.PERMISSION_GRANTED) {
-                requestPermissions(new String[]{android.Manifest.permission.READ_EXTERNAL_STORAGE}, 100);
+            try {
+                requestPermissions(new String[]{
+                        "android.permission.READ_EXTERNAL_STORAGE",
+                        "android.permission.WRITE_EXTERNAL_STORAGE",
+                        "android.permission.READ_MEDIA_AUDIO",
+                        "android.permission.READ_MEDIA_IMAGES",
+                        "android.permission.READ_MEDIA_VIDEO"
+                }, 100);
+            } catch (Exception ignored) {}
+        }
+
+        rootLayout = new FrameLayout(this);
+        rootLayout.setBackgroundColor(Color.BLACK);
+        setContentView(rootLayout);
+
+        /* Vérifier si une ROM existe déjà dans les dossiers standards */
+        File appFilesDir = getExternalFilesDir(null);
+        String[] possibleRoms = {
+                appFilesDir != null ? new File(appFilesDir, "PokemonPlatinum.nds").getAbsolutePath() : null,
+                "/sdcard/Android/data/com.game.pokeplatinum/files/PokemonPlatinum.nds",
+                "/sdcard/Download/PokemonPlatinum.nds",
+                "/sdcard/Download/pokemon_platine.nds",
+                "/sdcard/Download/pokemon.nds"
+        };
+
+        String foundRom = null;
+        for (String p : possibleRoms) {
+            if (p == null) continue;
+            File f = new File(p);
+            Log.i(TAG, "Recherche ROM dans: " + p + " (existe=" + f.exists() + ", taille=" + (f.exists() ? f.length() : 0) + ")");
+            if (f.exists() && f.length() > 1024 * 1024) {
+                foundRom = p;
+                Log.i(TAG, "ROM détectée avec succès: " + p);
+                break;
             }
         }
 
-        /* 1. Extraire les assets (y compris audio_wav) vers le dossier interne */
-        copyAssetsToFilesDir(this, "psp-assets");
+        if (foundRom != null) {
+            startEmulatorWithRom(foundRom);
+        } else {
+            showRomPickerUI();
+        }
+    }
 
-        /* 2. Init moteur graphique C via JNI */
-        File assetDir = new File(getFilesDir(), "psp-assets");
-        nativeInit(assetDir.getAbsolutePath());
+    private void showRomPickerUI() {
+        rootLayout.removeAllViews();
 
-        /* 3. Init AudioTrack + mixer C */
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setGravity(Gravity.CENTER);
+        panel.setPadding(40, 40, 40, 40);
+
+        TextView title = new TextView(this);
+        title.setText("Pokémon Platine\n(Cœur melonDS Natif ARM64)");
+        title.setTextColor(Color.WHITE);
+        title.setTextSize(24);
+        title.setGravity(Gravity.CENTER);
+        title.setPadding(0, 0, 0, 60);
+
+        Button btnPick = new Button(this);
+        btnPick.setText("📂 CHARGER UNE ROM .NDS");
+        btnPick.setTextSize(18);
+        btnPick.setBackgroundColor(Color.parseColor("#E53935"));
+        btnPick.setTextColor(Color.WHITE);
+        btnPick.setPadding(40, 30, 40, 30);
+        btnPick.setOnClickListener(v -> {
+            Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            intent.addCategory(Intent.CATEGORY_OPENABLE);
+            intent.setType("*/*");
+            startActivityForResult(intent, REQUEST_CODE_PICK_ROM);
+        });
+
+        TextView hint = new TextView(this);
+        hint.setText("\nSélectionne ton fichier Pokémon Platine (.nds) légitime.\nLe jeu tournera à 100% sur le vrai cœur Nintendo DS melonDS.");
+        hint.setTextColor(Color.LTGRAY);
+        hint.setTextSize(14);
+        hint.setGravity(Gravity.CENTER);
+
+        panel.addView(title);
+        panel.addView(btnPick);
+        panel.addView(hint);
+
+        rootLayout.addView(panel, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER));
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == REQUEST_CODE_PICK_ROM && resultCode == RESULT_OK && data != null) {
+            Uri uri = data.getData();
+            if (uri != null) {
+                try {
+                    File dest = new File(getExternalFilesDir(null), "PokemonPlatinum.nds");
+                    InputStream in = getContentResolver().openInputStream(uri);
+                    OutputStream out = new FileOutputStream(dest);
+                    byte[] buf = new byte[65536];
+                    int r;
+                    while ((r = in.read(buf)) > 0) {
+                        out.write(buf, 0, r);
+                    }
+                    in.close();
+                    out.close();
+                    startEmulatorWithRom(dest.getAbsolutePath());
+                } catch (Exception e) {
+                    Log.e(TAG, "Erreur copie ROM", e);
+                    Toast.makeText(this, "Erreur chargement ROM: " + e.getMessage(), Toast.LENGTH_LONG).show();
+                }
+            }
+        }
+    }
+
+    private void startEmulatorWithRom(String romPath) {
+        loadedRomPath = romPath;
+        File saveDir = getExternalFilesDir("saves");
+        if (saveDir == null) saveDir = getFilesDir();
+        saveDir.mkdirs();
+
+        Log.i(TAG, "Démarrage melonDS avec ROM: " + romPath + ", saveDir: " + saveDir.getAbsolutePath());
+
+        boolean ok = nativeInitEmulator(romPath, saveDir.getAbsolutePath());
+        if (!ok) {
+            Log.e(TAG, "Échec de nativeInitEmulator !");
+            Toast.makeText(this, "Échec du chargement de la ROM dans melonDS !", Toast.LENGTH_LONG).show();
+            showRomPickerUI();
+            return;
+        }
+
         initAudio();
 
-        /* 4. Afficher la vue de jeu */
-        gameView = new GameView(this);
-        setContentView(gameView);
+        rootLayout.removeAllViews();
+        gameView = new DSGameView(this);
+        rootLayout.addView(gameView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        isRunning = true;
     }
 
     private void initAudio() {
         try {
-            final int SAMPLE_RATE  = 22050;
-            final int CHANNEL_CONF = AudioFormat.CHANNEL_OUT_MONO;
-            final int ENCODING     = AudioFormat.ENCODING_PCM_16BIT;
+            /* melonDS SPU audio: 32768 Hz stéréo 16-bit PCM */
+            final int sampleRate = 32768;
+            final int channelConfig = AudioFormat.CHANNEL_OUT_STEREO;
+            final int encoding = AudioFormat.ENCODING_PCM_16BIT;
 
-            int minBuf = AudioTrack.getMinBufferSize(SAMPLE_RATE, CHANNEL_CONF, ENCODING);
-            int bufSize = Math.max(minBuf * 2, 4096 * 2);
+            int minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding);
+            int bufSize = Math.max(minBuf * 2, 4096 * 4);
 
             audioTrack = new AudioTrack(
                     AudioManager.STREAM_MUSIC,
-                    SAMPLE_RATE,
-                    CHANNEL_CONF,
-                    ENCODING,
+                    sampleRate,
+                    channelConfig,
+                    encoding,
                     bufSize,
                     AudioTrack.MODE_STREAM);
+            audioTrack.play();
 
-            nativeAudioInit(audioTrack);
-            Log.i(TAG, "AudioTrack initialisé avec succès");
-            /* Lancement de la musique du menu Platine (BGM_TRACK_TITLE = 1) */
-            nativeAudioPlayBgm(1);
+            audioThread = new Thread(() -> {
+                short[] pcmBuf = new short[2048];
+                while (isRunning) {
+                    int samples = nativeGetAudioSamples(pcmBuf);
+                    if (samples > 0) {
+                        audioTrack.write(pcmBuf, 0, samples);
+                    } else {
+                        try {
+                            Thread.sleep(2);
+                        } catch (InterruptedException ignored) {}
+                    }
+                }
+            }, "MelonDS_AudioPump");
+            audioThread.setPriority(Thread.MAX_PRIORITY);
+            audioThread.start();
+            Log.i(TAG, "AudioTrack initialisé avec succès (32768 Hz Stéréo PCM)");
         } catch (Exception e) {
             Log.e(TAG, "Erreur initialisation audio", e);
         }
@@ -110,8 +265,9 @@ public class MainActivity extends Activity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
-        nativeAudioShutdown();
-        nativeShutdown();
+        isRunning = false;
+        if (gameView != null) gameView.pause();
+        nativeShutdownEmulator();
         if (audioTrack != null) {
             try {
                 audioTrack.stop();
@@ -120,459 +276,273 @@ public class MainActivity extends Activity {
         }
     }
 
-    /* ---------------------------------------------------------------- */
-    /* JNI Graphique & Système                                           */
-    /* ---------------------------------------------------------------- */
-    public static native void nativeInit(String assetRootPath);
-    public static native void nativeShutdown();
-    public static native void nativeUpdate(int inputFlags, int touchX, int touchY, boolean touchDown);
-    public static native void nativeRender(int[] mainPixels, int[] subPixels);
-
-    /* ---------------------------------------------------------------- */
-    /* JNI Audio                                                         */
-    /* ---------------------------------------------------------------- */
-    public static native void nativeAudioInit(AudioTrack track);
-    public static native void nativeAudioShutdown();
-    public static native void nativeAudioSetSource(String wavPath, boolean loop);
-    public static native void nativeAudioPlayBgm(int trackId);
-
-    /* ---------------------------------------------------------------- */
-    /* Copie récursive des assets                                       */
-    /* ---------------------------------------------------------------- */
-    private static void copyAssetsToFilesDir(Context context, String path) {
-        try {
-            String[] list = context.getAssets().list(path);
-            if (list == null || list.length == 0) {
-                copySingleFile(context, path);
-            } else {
-                File dir = new File(context.getFilesDir(), path);
-                if (!dir.exists()) dir.mkdirs();
-                for (String file : list) {
-                    copyAssetsToFilesDir(context, path + "/" + file);
-                }
-            }
-        } catch (Exception e) {
-            Log.e(TAG, "Erreur copie assets " + path, e);
-        }
-    }
-
-    private static void copySingleFile(Context context, String srcPath) {
-        File outFile = new File(context.getFilesDir(), srcPath);
-        if (outFile.exists() && outFile.length() > 0) return;
-        outFile.getParentFile().mkdirs();
-        try (InputStream in  = context.getAssets().open(srcPath);
-             OutputStream out = new FileOutputStream(outFile)) {
-            byte[] buf = new byte[8192];
-            int read;
-            while ((read = in.read(buf)) != -1) out.write(buf, 0, read);
-        } catch (Exception e) {
-            Log.e(TAG, "Erreur copie fichier " + srcPath, e);
-        }
-    }
-
     /* ================================================================ */
-    /* GameView — Rendu double-écran DS + Joystick virtuel analogique    */
+    /* DSGameView — Rendu réel des 2 écrans DS + Contrôles tactiles     */
     /* ================================================================ */
-    static class GameView extends SurfaceView implements Runnable {
+    class DSGameView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
 
-        private Thread           renderThread = null;
-        private volatile boolean running      = false;
-        private final SurfaceHolder holder;
+        private Thread renderThread = null;
+        private volatile boolean threadRunning = false;
+        private final SurfaceHolder surfaceHolder;
 
-        /* Bitmaps Nintendo DS (256x192 chacun) */
+        /* Bitmaps des deux écrans Nintendo DS natifs (256x192 chacun) */
         private final Bitmap topBitmap;
         private final Bitmap bottomBitmap;
-        private final int[]  topPixels = new int[256 * 192];
-        private final int[]  subPixels = new int[256 * 192];
+        private final int[] topPixels = new int[256 * 192];
+        private final int[] bottomPixels = new int[256 * 192];
 
-        /* Entrées */
-        private int     inputFlags = 0;
-        private int     touchX     = 0, touchY = 0;
-        private boolean touchDown  = false;
+        /* Masque d'entrées et coordonnées tactiles */
+        private int inputMask = 0;
+        private int dsTouchX = 0;
+        private int dsTouchY = 0;
+        private boolean dsTouching = false;
 
-        /* Constantes de boutons identiques à pal_input.h */
-        static final int PAL_BUTTON_A      = 1 << 0;
-        static final int PAL_BUTTON_B      = 1 << 1;
-        static final int PAL_BUTTON_SELECT = 1 << 2;
-        static final int PAL_BUTTON_START  = 1 << 3;
-        static final int PAL_BUTTON_RIGHT  = 1 << 4;
-        static final int PAL_BUTTON_LEFT   = 1 << 5;
-        static final int PAL_BUTTON_UP     = 1 << 6;
-        static final int PAL_BUTTON_DOWN   = 1 << 7;
-        static final int PAL_BUTTON_R      = 1 << 8;
-        static final int PAL_BUTTON_L      = 1 << 9;
-        static final int PAL_BUTTON_X      = 1 << 10;
-        static final int PAL_BUTTON_Y      = 1 << 11;
+        /* Définitions des touches DS (identiques au pont C) */
+        static final int BTN_A      = 1 << 0;
+        static final int BTN_B      = 1 << 1;
+        static final int BTN_SELECT = 1 << 2;
+        static final int BTN_START  = 1 << 3;
+        static final int BTN_RIGHT  = 1 << 4;
+        static final int BTN_LEFT   = 1 << 5;
+        static final int BTN_UP     = 1 << 6;
+        static final int BTN_DOWN   = 1 << 7;
+        static final int BTN_R      = 1 << 8;
+        static final int BTN_L      = 1 << 9;
+        static final int BTN_X      = 1 << 10;
+        static final int BTN_Y      = 1 << 11;
 
-        /* Joystick virtuel analogique */
-        private float stickBaseX = 0, stickBaseY = 0;
-        private float stickKnobX = 0, stickKnobY = 0;
-        private float stickRadius = 0;
-        private boolean stickActive = false;
+        /* Rectangles d'affichage à l'écran */
+        private final Rect srcRect = new Rect(0, 0, 256, 192);
+        private final RectF dstTopRect = new RectF();
+        private final RectF dstBottomRect = new RectF();
 
-        public GameView(Context context) {
+        /* Peintures de rendu */
+        private final Paint screenPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
+        private final Paint bgPaint = new Paint();
+        private final Paint ctrlPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint ctrlTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+
+        public DSGameView(Context context) {
             super(context);
-            holder       = getHolder();
-            topBitmap    = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
+            surfaceHolder = getHolder();
+            surfaceHolder.addCallback(this);
+
+            topBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
             bottomBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
+
+            bgPaint.setColor(Color.parseColor("#121212"));
+
+            ctrlPaint.setStyle(Paint.Style.FILL);
+            ctrlPaint.setColor(Color.argb(120, 200, 200, 200));
+
+            ctrlTextPaint.setColor(Color.WHITE);
+            ctrlTextPaint.setTextSize(36f);
+            ctrlTextPaint.setTextAlign(Paint.Align.CENTER);
+            ctrlTextPaint.setFakeBoldText(true);
         }
 
         public void resume() {
-            running = true;
-            renderThread = new Thread(this);
-            renderThread.start();
-        }
-
-        public void pause() {
-            running = false;
-            try {
-                if (renderThread != null) renderThread.join(1000);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
+            threadRunning = true;
+            if (renderThread == null || !renderThread.isAlive()) {
+                renderThread = new Thread(this, "MelonDS_RenderLoop");
+                renderThread.start();
             }
         }
 
-        /* ------------------------------------------------------------ */
-        /* Gestion Multi-Touch complète (Pointeurs multiples)           */
-        /* ------------------------------------------------------------ */
+        public void pause() {
+            threadRunning = false;
+            if (renderThread != null) {
+                try {
+                    renderThread.join(1000);
+                } catch (InterruptedException ignored) {}
+                renderThread = null;
+            }
+        }
+
+        @Override
+        public void surfaceCreated(SurfaceHolder holder) {
+            resume();
+        }
+
+        @Override
+        public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+            computeScreenLayout(width, height);
+        }
+
+        @Override
+        public void surfaceDestroyed(SurfaceHolder holder) {
+            pause();
+        }
+
+        private void computeScreenLayout(int w, int h) {
+            /* Ratio 4:3 DS = 256 / 192 = 1.333 */
+            float targetRatio = 256f / 192f;
+            
+            /* On réserve la moitié supérieure pour l'écran 1, et la moitié inférieure pour l'écran 2 */
+            float screenH = (h * 0.44f);
+            float screenW = screenH * targetRatio;
+            if (screenW > w * 0.95f) {
+                screenW = w * 0.95f;
+                screenH = screenW / targetRatio;
+            }
+
+            float left = (w - screenW) / 2f;
+            dstTopRect.set(left, 10f, left + screenW, 10f + screenH);
+            dstBottomRect.set(left, 20f + screenH, left + screenW, 20f + (screenH * 2f));
+        }
+
+        @Override
+        public void run() {
+            final long FRAME_TIME_NS = 1000000000L / 60L; /* 60 FPS */
+
+            while (threadRunning) {
+                long startTime = System.nanoTime();
+
+                /* 1. Émulation matérielle NDS : exécution d'une frame melonDS */
+                boolean frameOk = nativeRunFrame(topPixels, bottomPixels, inputMask, dsTouchX, dsTouchY, dsTouching);
+
+                if (frameOk) {
+                    topBitmap.setPixels(topPixels, 0, 256, 0, 0, 256, 192);
+                    bottomBitmap.setPixels(bottomPixels, 0, 256, 0, 0, 256, 192);
+                }
+
+                /* 2. Rendu graphique natif sur SurfaceView */
+                Canvas canvas = surfaceHolder.lockCanvas();
+                if (canvas != null) {
+                    try {
+                        canvas.drawPaint(bgPaint);
+
+                        /* Dessin direct des 2 vrais framebuffers Nintendo DS */
+                        canvas.drawBitmap(topBitmap, srcRect, dstTopRect, screenPaint);
+                        canvas.drawBitmap(bottomBitmap, srcRect, dstBottomRect, screenPaint);
+
+                        /* Bordure des écrans DS */
+                        Paint borderPaint = new Paint();
+                        borderPaint.setColor(Color.DKGRAY);
+                        borderPaint.setStyle(Paint.Style.STROKE);
+                        borderPaint.setStrokeWidth(3f);
+                        canvas.drawRect(dstTopRect, borderPaint);
+                        canvas.drawRect(dstBottomRect, borderPaint);
+
+                        /* Rendu des contrôles virtuels transparents */
+                        drawOnScreenControls(canvas);
+                    } finally {
+                        surfaceHolder.unlockCanvasAndPost(canvas);
+                    }
+                }
+
+                /* 3. Régulation 60 FPS */
+                long elapsed = System.nanoTime() - startTime;
+                long sleepNs = FRAME_TIME_NS - elapsed;
+                if (sleepNs > 0) {
+                    try {
+                        Thread.sleep(sleepNs / 1000000L, (int) (sleepNs % 1000000L));
+                    } catch (InterruptedException ignored) {}
+                }
+            }
+        }
+
+        private void drawOnScreenControls(Canvas canvas) {
+            int w = getWidth();
+            int h = getHeight();
+            if (w == 0 || h == 0) return;
+
+            /* Boutons directionnels D-Pad à gauche */
+            float dpadCenterX = w * 0.15f;
+            float dpadCenterY = h * 0.82f;
+            float btnSize = w * 0.07f;
+
+            drawButton(canvas, dpadCenterX, dpadCenterY - btnSize * 1.5f, btnSize, "▲", (inputMask & BTN_UP) != 0);
+            drawButton(canvas, dpadCenterX, dpadCenterY + btnSize * 1.5f, btnSize, "▼", (inputMask & BTN_DOWN) != 0);
+            drawButton(canvas, dpadCenterX - btnSize * 1.5f, dpadCenterY, btnSize, "◀", (inputMask & BTN_LEFT) != 0);
+            drawButton(canvas, dpadCenterX + btnSize * 1.5f, dpadCenterY, btnSize, "▶", (inputMask & BTN_RIGHT) != 0);
+
+            /* Boutons d'action A, B, X, Y à droite */
+            float actionCenterX = w * 0.85f;
+            float actionCenterY = h * 0.82f;
+
+            drawButton(canvas, actionCenterX + btnSize * 1.4f, actionCenterY, btnSize, "A", (inputMask & BTN_A) != 0);
+            drawButton(canvas, actionCenterX, actionCenterY + btnSize * 1.4f, btnSize, "B", (inputMask & BTN_B) != 0);
+            drawButton(canvas, actionCenterX, actionCenterY - btnSize * 1.4f, btnSize, "X", (inputMask & BTN_X) != 0);
+            drawButton(canvas, actionCenterX - btnSize * 1.4f, actionCenterY, btnSize, "Y", (inputMask & BTN_Y) != 0);
+
+            /* Triggers L et R en haut */
+            drawButton(canvas, w * 0.10f, dstTopRect.top + 30f, btnSize * 1.2f, "L", (inputMask & BTN_L) != 0);
+            drawButton(canvas, w * 0.90f, dstTopRect.top + 30f, btnSize * 1.2f, "R", (inputMask & BTN_R) != 0);
+
+            /* Select & Start au centre bas */
+            drawButton(canvas, w * 0.40f, h * 0.95f, btnSize * 0.8f, "SEL", (inputMask & BTN_SELECT) != 0);
+            drawButton(canvas, w * 0.60f, h * 0.95f, btnSize * 0.8f, "START", (inputMask & BTN_START) != 0);
+        }
+
+        private void drawButton(Canvas canvas, float cx, float cy, float r, String label, boolean pressed) {
+            ctrlPaint.setColor(pressed ? Color.argb(200, 255, 100, 100) : Color.argb(120, 200, 200, 200));
+            canvas.drawCircle(cx, cy, r, ctrlPaint);
+            ctrlTextPaint.setTextSize(r * 0.8f);
+            canvas.drawText(label, cx, cy + (r * 0.3f), ctrlTextPaint);
+        }
+
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             int actionMasked = event.getActionMasked();
             int pointerCount = event.getPointerCount();
 
+            int mask = 0;
+            boolean touchingSub = false;
+            int touchX = 0;
+            int touchY = 0;
+
             int w = getWidth();
             int h = getHeight();
-            if (w <= 0 || h <= 0) return true;
+            float btnSize = w * 0.07f;
+            float dpadCenterX = w * 0.15f;
+            float dpadCenterY = h * 0.82f;
+            float actionCenterX = w * 0.85f;
+            float actionCenterY = h * 0.82f;
 
-            float scale   = (float)w / 256.0f;
-            int scaledH   = (int)(192.0f * scale);
-            int gap       = 8;
-            int btnH      = Math.max(120, (int)(h * 0.28f));
-            int availH    = h - btnH;
-            int totalDSH  = scaledH * 2 + gap;
-            int offsetY   = (availH - totalDSH) / 2;
-            if (offsetY < 0) offsetY = 0;
+            if (actionMasked != MotionEvent.ACTION_UP && actionMasked != MotionEvent.ACTION_CANCEL) {
+                for (int i = 0; i < pointerCount; i++) {
+                    float px = event.getX(i);
+                    float py = event.getY(i);
 
-            int topY       = offsetY;
-            int bottomY    = offsetY + scaledH + gap;
-            int bottomEndY = bottomY + scaledH;
-            int btnTopY    = h - btnH;
-
-            /* Calcul dimensions joystick et boutons */
-            stickBaseX = w * 0.22f;
-            stickBaseY = btnTopY + btnH * 0.55f;
-            stickRadius = btnH * 0.38f;
-
-            float btnRadius = btnH * 0.17f;
-            float btnCenterRx = w * 0.82f;
-            float btnCenterRy = btnTopY + btnH * 0.55f;
-            float btnSpacing  = btnRadius * 1.55f;
-
-            /* Coordonnées des boutons A, B, X, Y */
-            float aX = btnCenterRx + btnSpacing, aY = btnCenterRy;
-            float bX = btnCenterRx, bY = btnCenterRy + btnSpacing;
-            float xX = btnCenterRx, xY = btnCenterRy - btnSpacing;
-            float yX = btnCenterRx - btnSpacing, yY = btnCenterRy;
-
-            /* START / SELECT */
-            float selX = w * 0.44f, selY = btnTopY + btnH * 0.82f;
-            float staX = w * 0.56f, staY = btnTopY + btnH * 0.82f;
-            float smR  = btnH * 0.12f;
-
-            /* L & R Buttons (en haut de la zone de contrôle) */
-            float lBtnX = w * 0.15f, lBtnY = btnTopY + btnH * 0.12f;
-            float rBtnX = w * 0.85f, rBtnY = btnTopY + btnH * 0.12f;
-            float shoulderW = w * 0.14f, shoulderH = btnH * 0.16f;
-
-            /* Recalculer les états à partir de tous les doigts actifs */
-            int newFlags = 0;
-            boolean newTouchDown = false;
-            int newTouchX = 0, newTouchY = 0;
-            boolean stickFound = false;
-
-            for (int i = 0; i < pointerCount; i++) {
-                if (actionMasked == MotionEvent.ACTION_UP ||
-                    actionMasked == MotionEvent.ACTION_CANCEL) {
-                    break;
-                }
-                int actionIndex = event.getActionIndex();
-                if ((actionMasked == MotionEvent.ACTION_POINTER_UP) && (i == actionIndex)) {
-                    continue; // Doigt en train d'être levé
-                }
-
-                float px = event.getX(i);
-                float py = event.getY(i);
-
-                /* 1. Écran DS inférieur (stylet tactile / Pokétch) */
-                if (py >= bottomY && py <= bottomEndY) {
-                    newTouchDown = true;
-                    newTouchX = (int)Math.max(0, Math.min(255, (px / w) * 256.0f));
-                    newTouchY = (int)Math.max(0, Math.min(191, ((py - bottomY) / (float)scaledH) * 192.0f));
-                }
-                /* 2. Écran DS supérieur (toucher direct pour options menu et dialogues) */
-                else if (py >= topY && py < bottomY) {
-                    newTouchDown = true;
-                    newTouchX = (int)Math.max(0, Math.min(255, (px / w) * 256.0f));
-                    newTouchY = (int)Math.max(0, Math.min(191, ((py - topY) / (float)scaledH) * 192.0f));
-                    newFlags |= PAL_BUTTON_A;
-                }
-                /* 3. Zone manette (boutons et joystick) */
-                else if (py >= btnTopY) {
-                    /* Joystick tactile (partie gauche) */
-                    float distStick = dist(px, py, stickBaseX, stickBaseY);
-                    if (distStick <= stickRadius * 2.0f || (stickActive && px < w * 0.50f)) {
-                        stickFound = true;
-                        float dx = px - stickBaseX;
-                        float dy = py - stickBaseY;
-                        float len = (float)Math.sqrt(dx * dx + dy * dy);
-                        if (len > stickRadius) {
-                            dx = (dx / len) * stickRadius;
-                            dy = (dy / len) * stickRadius;
-                        }
-                        stickKnobX = stickBaseX + dx;
-                        stickKnobY = stickBaseY + dy;
-
-                        /* Deadzone (18% du rayon) - réactivité instantanée */
-                        if (len > stickRadius * 0.18f) {
-                            double angle = Math.toDegrees(Math.atan2(dy, dx)); // -180 à 180
-                            // 8 directions (angles)
-                            if (angle >= -157.5 && angle <= -22.5)  newFlags |= PAL_BUTTON_UP;
-                            if (angle >= 22.5   && angle <= 157.5)  newFlags |= PAL_BUTTON_DOWN;
-                            if (angle >= 112.5  || angle <= -112.5) newFlags |= PAL_BUTTON_LEFT;
-                            if (angle >= -67.5  && angle <= 67.5)   newFlags |= PAL_BUTTON_RIGHT;
-                        }
+                    /* 1. Détection du toucher direct sur l'écran tactile du bas (Sub Screen) */
+                    if (dstBottomRect.contains(px, py)) {
+                        touchingSub = true;
+                        float relX = (px - dstBottomRect.left) / dstBottomRect.width();
+                        float relY = (py - dstBottomRect.top) / dstBottomRect.height();
+                        touchX = (int) (relX * 256f);
+                        touchY = (int) (relY * 192f);
+                        continue;
                     }
 
-                    /* Boutons A, B, X, Y avec tolérance tactile étendue */
-                    if (dist(px, py, aX, aY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_A;
-                    if (dist(px, py, bX, bY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_B;
-                    if (dist(px, py, xX, xY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_X;
-                    if (dist(px, py, yX, yY) <= btnRadius * 1.55f) newFlags |= PAL_BUTTON_Y;
+                    /* 2. Boutons directionnels D-Pad */
+                    if (Math.hypot(px - dpadCenterX, py - (dpadCenterY - btnSize * 1.5f)) < btnSize * 1.5f) mask |= BTN_UP;
+                    if (Math.hypot(px - dpadCenterX, py - (dpadCenterY + btnSize * 1.5f)) < btnSize * 1.5f) mask |= BTN_DOWN;
+                    if (Math.hypot(px - (dpadCenterX - btnSize * 1.5f), py - dpadCenterY) < btnSize * 1.5f) mask |= BTN_LEFT;
+                    if (Math.hypot(px - (dpadCenterX + btnSize * 1.5f), py - dpadCenterY) < btnSize * 1.5f) mask |= BTN_RIGHT;
 
-                    /* Boutons START / SELECT */
-                    if (dist(px, py, selX, selY) <= smR * 1.5f) newFlags |= PAL_BUTTON_SELECT;
-                    if (dist(px, py, staX, staY) <= smR * 1.5f) newFlags |= PAL_BUTTON_START;
+                    /* 3. Boutons A, B, X, Y */
+                    if (Math.hypot(px - (actionCenterX + btnSize * 1.4f), py - actionCenterY) < btnSize * 1.5f) mask |= BTN_A;
+                    if (Math.hypot(px - actionCenterX, py - (actionCenterY + btnSize * 1.4f)) < btnSize * 1.5f) mask |= BTN_B;
+                    if (Math.hypot(px - actionCenterX, py - (actionCenterY - btnSize * 1.4f)) < btnSize * 1.5f) mask |= BTN_X;
+                    if (Math.hypot(px - (actionCenterX - btnSize * 1.4f), py - actionCenterY) < btnSize * 1.5f) mask |= BTN_Y;
 
-                    /* Gâchettes L / R */
-                    if (Math.abs(px - lBtnX) <= shoulderW * 1.2f && Math.abs(py - lBtnY) <= shoulderH * 1.2f) {
-                        newFlags |= PAL_BUTTON_L;
-                    }
-                    if (Math.abs(px - rBtnX) <= shoulderW * 1.2f && Math.abs(py - rBtnY) <= shoulderH * 1.2f) {
-                        newFlags |= PAL_BUTTON_R;
-                    }
+                    /* 4. Triggers L, R */
+                    if (Math.hypot(px - (w * 0.10f), py - (dstTopRect.top + 30f)) < btnSize * 1.8f) mask |= BTN_L;
+                    if (Math.hypot(px - (w * 0.90f), py - (dstTopRect.top + 30f)) < btnSize * 1.8f) mask |= BTN_R;
+
+                    /* 5. Select, Start */
+                    if (Math.hypot(px - (w * 0.40f), py - (h * 0.95f)) < btnSize * 1.2f) mask |= BTN_SELECT;
+                    if (Math.hypot(px - (w * 0.60f), py - (h * 0.95f)) < btnSize * 1.2f) mask |= BTN_START;
                 }
             }
 
-            stickActive = stickFound;
-            if (!stickActive) {
-                stickKnobX = stickBaseX;
-                stickKnobY = stickBaseY;
-            }
-
-            inputFlags = newFlags;
-            touchDown  = newTouchDown;
-            touchX     = newTouchX;
-            touchY     = newTouchY;
+            inputMask = mask;
+            dsTouching = touchingSub;
+            dsTouchX = touchX;
+            dsTouchY = touchY;
 
             return true;
-        }
-
-        private static float dist(float x1, float y1, float x2, float y2) {
-            float dx = x1 - x2;
-            float dy = y1 - y2;
-            return (float)Math.sqrt(dx * dx + dy * dy);
-        }
-
-        /* ------------------------------------------------------------ */
-        /* Boucle de rendu 60 FPS                                       */
-        /* ------------------------------------------------------------ */
-        @Override
-        public void run() {
-            Paint paint = new Paint();
-            paint.setFilterBitmap(false);
-
-            Paint fillPaint = new Paint();
-            fillPaint.setAntiAlias(true);
-
-            Paint strokePaint = new Paint();
-            strokePaint.setAntiAlias(true);
-            strokePaint.setStyle(Paint.Style.STROKE);
-
-            Paint textPaint = new Paint();
-            textPaint.setAntiAlias(true);
-            textPaint.setColor(Color.WHITE);
-            textPaint.setTextAlign(Paint.Align.CENTER);
-
-            while (running) {
-                if (!holder.getSurface().isValid()) {
-                    try { Thread.sleep(8); } catch (InterruptedException ignored) {}
-                    continue;
-                }
-
-                /* 1. Mise à jour moteur C */
-                nativeUpdate(inputFlags, touchX, touchY, touchDown);
-
-                /* 2. Rendu pixels C */
-                nativeRender(topPixels, subPixels);
-
-                topBitmap.setPixels(   topPixels, 0, 256, 0, 0, 256, 192);
-                bottomBitmap.setPixels(subPixels,  0, 256, 0, 0, 256, 192);
-
-                /* 3. Dessin sur Canvas Android */
-                Canvas canvas = holder.lockCanvas();
-                if (canvas != null) {
-                    canvas.drawColor(0xFF101018);
-
-                    int w = getWidth();
-                    int h = getHeight();
-
-                    float scale   = (float)w / 256.0f;
-                    int scaledH   = (int)(192.0f * scale);
-                    int gap       = 8;
-                    int btnH      = Math.max(120, (int)(h * 0.28f));
-                    int availH    = h - btnH;
-                    int totalDSH  = scaledH * 2 + gap;
-                    int offsetY   = (availH - totalDSH) / 2;
-                    if (offsetY < 0) offsetY = 0;
-
-                    /* Écran DS Haut */
-                    Rect dstTop = new Rect(0, offsetY, w, offsetY + scaledH);
-                    canvas.drawBitmap(topBitmap, null, dstTop, paint);
-
-                    /* Écran DS Bas (Tactile) */
-                    Rect dstBottom = new Rect(0, offsetY + scaledH + gap, w, offsetY + scaledH * 2 + gap);
-                    canvas.drawBitmap(bottomBitmap, null, dstBottom, paint);
-
-                    /* Bordures d'écran DS */
-                    strokePaint.setColor(0xFF303040);
-                    strokePaint.setStrokeWidth(2f);
-                    canvas.drawRect(dstTop, strokePaint);
-                    canvas.drawRect(dstBottom, strokePaint);
-
-                    /* Zone manette de jeu */
-                    int btnTopY = h - btnH;
-                    drawControls(canvas, fillPaint, strokePaint, textPaint, w, btnTopY, btnH);
-
-                    holder.unlockCanvasAndPost(canvas);
-                }
-
-                try { Thread.sleep(16); } catch (InterruptedException ignored) {}
-            }
-        }
-
-        /* ------------------------------------------------------------ */
-        /* Dessin des contrôles tactiles                                */
-        /* ------------------------------------------------------------ */
-        private void drawControls(Canvas canvas, Paint fill, Paint stroke, Paint text,
-                                  int w, int top, int bh) {
-            /* Fond dégradé subtil */
-            fill.setColor(0xCC151520);
-            canvas.drawRect(0, top, w, top + bh, fill);
-
-            /* 1. Joystick virtuel analogique */
-            float jRadius = bh * 0.38f;
-            float jBaseX  = w * 0.22f;
-            float jBaseY  = top + bh * 0.55f;
-
-            if (!stickActive) {
-                stickKnobX = jBaseX;
-                stickKnobY = jBaseY;
-            }
-
-            // Base extérieure
-            fill.setColor(0x44FFFFFF);
-            canvas.drawCircle(jBaseX, jBaseY, jRadius, fill);
-            stroke.setColor(0x88FFFFFF);
-            stroke.setStrokeWidth(3f);
-            canvas.drawCircle(jBaseX, jBaseY, jRadius, stroke);
-
-            // Flèches directrices subtiles
-            fill.setColor(0x66FFFFFF);
-            canvas.drawCircle(jBaseX, jBaseY - jRadius * 0.65f, 5f, fill);
-            canvas.drawCircle(jBaseX, jBaseY + jRadius * 0.65f, 5f, fill);
-            canvas.drawCircle(jBaseX - jRadius * 0.65f, jBaseY, 5f, fill);
-            canvas.drawCircle(jBaseX + jRadius * 0.65f, jBaseY, 5f, fill);
-
-            // Knob central mobile
-            fill.setColor(stickActive ? 0xFF00B4D8 : 0xAA90E0EF);
-            canvas.drawCircle(stickKnobX, stickKnobY, jRadius * 0.45f, fill);
-            stroke.setColor(0xFFFFFFFF);
-            stroke.setStrokeWidth(2.5f);
-            canvas.drawCircle(stickKnobX, stickKnobY, jRadius * 0.45f, stroke);
-
-            /* 2. Boutons A, B, X, Y */
-            float btnRadius = bh * 0.17f;
-            float btnCenterRx = w * 0.82f;
-            float btnCenterRy = top + bh * 0.55f;
-            float btnSpacing  = btnRadius * 1.55f;
-
-            drawButton(canvas, fill, stroke, text, btnCenterRx + btnSpacing, btnCenterRy, btnRadius, "A", 0xFF2A9D8F, (inputFlags & PAL_BUTTON_A) != 0);
-            drawButton(canvas, fill, stroke, text, btnCenterRx, btnCenterRy + btnSpacing, btnRadius, "B", 0xFFE76F51, (inputFlags & PAL_BUTTON_B) != 0);
-            drawButton(canvas, fill, stroke, text, btnCenterRx, btnCenterRy - btnSpacing, btnRadius, "X", 0xFF457B9D, (inputFlags & PAL_BUTTON_X) != 0);
-            drawButton(canvas, fill, stroke, text, btnCenterRx - btnSpacing, btnCenterRy, btnRadius, "Y", 0xFFE9C46A, (inputFlags & PAL_BUTTON_Y) != 0);
-
-            /* 3. Boutons START / SELECT */
-            float selX = w * 0.44f, selY = top + bh * 0.82f;
-            float staX = w * 0.56f, staY = top + bh * 0.82f;
-            float smW  = bh * 0.22f, smH = bh * 0.10f;
-
-            drawCapsule(canvas, fill, stroke, text, selX, selY, smW, smH, "SELECT", (inputFlags & PAL_BUTTON_SELECT) != 0);
-            drawCapsule(canvas, fill, stroke, text, staX, staY, smW, smH, "START",  (inputFlags & PAL_BUTTON_START) != 0);
-
-            /* 4. Gâchettes L / R */
-            float lBtnX = w * 0.15f, lBtnY = top + bh * 0.12f;
-            float rBtnX = w * 0.85f, rBtnY = top + bh * 0.12f;
-            float shW   = w * 0.14f, shH   = bh * 0.16f;
-
-            drawShoulder(canvas, fill, stroke, text, lBtnX, lBtnY, shW, shH, "L", (inputFlags & PAL_BUTTON_L) != 0);
-            drawShoulder(canvas, fill, stroke, text, rBtnX, rBtnY, shW, shH, "R", (inputFlags & PAL_BUTTON_R) != 0);
-        }
-
-        private void drawButton(Canvas canvas, Paint fill, Paint stroke, Paint text,
-                                float cx, float cy, float r, String label, int baseColor, boolean pressed) {
-            fill.setColor(pressed ? 0xFFFFFFFF : baseColor);
-            canvas.drawCircle(cx, cy, r, fill);
-
-            stroke.setColor(pressed ? baseColor : 0xFFFFFFFF);
-            stroke.setStrokeWidth(3f);
-            canvas.drawCircle(cx, cy, r, stroke);
-
-            text.setColor(pressed ? 0xFF000000 : 0xFFFFFFFF);
-            text.setTextSize(r * 0.9f);
-            text.setFakeBoldText(true);
-            canvas.drawText(label, cx, cy + r * 0.32f, text);
-        }
-
-        private void drawCapsule(Canvas canvas, Paint fill, Paint stroke, Paint text,
-                                 float cx, float cy, float w, float h, String label, boolean pressed) {
-            RectF rect = new RectF(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
-            fill.setColor(pressed ? 0xFFFFFFFF : 0xFF353545);
-            canvas.drawRoundRect(rect, h * 0.5f, h * 0.5f, fill);
-
-            stroke.setColor(0x88FFFFFF);
-            stroke.setStrokeWidth(2f);
-            canvas.drawRoundRect(rect, h * 0.5f, h * 0.5f, stroke);
-
-            text.setColor(pressed ? 0xFF000000 : 0xFFDDDDDD);
-            text.setTextSize(h * 0.65f);
-            text.setFakeBoldText(true);
-            canvas.drawText(label, cx, cy + h * 0.25f, text);
-        }
-
-        private void drawShoulder(Canvas canvas, Paint fill, Paint stroke, Paint text,
-                                  float cx, float cy, float w, float h, String label, boolean pressed) {
-            RectF rect = new RectF(cx - w * 0.5f, cy - h * 0.5f, cx + w * 0.5f, cy + h * 0.5f);
-            fill.setColor(pressed ? 0xFFFFFFFF : 0xFF2A2A38);
-            canvas.drawRoundRect(rect, 8f, 8f, fill);
-
-            stroke.setColor(0xAAFFFFFF);
-            stroke.setStrokeWidth(2f);
-            canvas.drawRoundRect(rect, 8f, 8f, stroke);
-
-            text.setColor(pressed ? 0xFF000000 : 0xFFFFFFFF);
-            text.setTextSize(h * 0.65f);
-            text.setFakeBoldText(true);
-            canvas.drawText(label, cx, cy + h * 0.28f, text);
         }
     }
 }
