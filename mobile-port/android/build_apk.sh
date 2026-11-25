@@ -34,12 +34,12 @@ echo "    libretro.so copié dans l'APK !"
 # ---------------------------------------------------------------------------
 echo "==> 3. Compilation du pont JNI melonDS (libpokeplatinum.so ARM64)..."
 "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android34-clang" \
-    -O2 -fPIC -shared \
+    -O3 -DNDEBUG -march=armv8-a -fomit-frame-pointer -fPIC -shared \
     -I"$CPP/include" \
     -I/opt/melonds_core/src/libretro/libretro-common/include \
     "$CPP/melonds_bridge.c" \
     -L"$MELONDS_LIBS" -lretro \
-    -llog -landroid -lm \
+    -ljnigraphics -llog -landroid -lm \
     -o "$BUILD_DIR/apk/lib/arm64-v8a/libpokeplatinum.so"
 echo "    libpokeplatinum.so compilé avec succès !"
 

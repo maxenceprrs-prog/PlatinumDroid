@@ -41,10 +41,10 @@ public class MainActivity extends Activity {
         System.loadLibrary("pokeplatinum");
     }
 
-    /* Méthodes JNI du vrai cœur melonDS */
+    /* Méthodes JNI du vrai cœur melonDS haute performance */
     public static native boolean nativeInitEmulator(String romPath, String saveDir);
-    public static native boolean nativeRunFrame(int[] topPixels, int[] bottomPixels,
-                                               int inputMask, int touchX, int touchY, boolean isTouching);
+    public static native boolean nativeRunFrameDirect(Bitmap targetBitmap,
+                                                      int inputMask, int touchX, int touchY, boolean isTouching);
     public static native int nativeGetAudioSamples(short[] audioBuffer);
     public static native void nativeShutdownEmulator();
 
@@ -122,7 +122,7 @@ public class MainActivity extends Activity {
         panel.setPadding(40, 40, 40, 40);
 
         TextView title = new TextView(this);
-        title.setText("Pokémon Platine\n(Cœur melonDS Natif ARM64)");
+        title.setText("Pokémon Platine\n(melonDS ARM64 JIT Optimisé)");
         title.setTextColor(Color.WHITE);
         title.setTextSize(24);
         title.setGravity(Gravity.CENTER);
@@ -142,7 +142,7 @@ public class MainActivity extends Activity {
         });
 
         TextView hint = new TextView(this);
-        hint.setText("\nSélectionne ton fichier Pokémon Platine (.nds) légitime.\nLe jeu tournera à 100% sur le vrai cœur Nintendo DS melonDS.");
+        hint.setText("\nSélectionne ton fichier Pokémon Platine (.nds) légitime.\nLe jeu tournera à 100% sur melonDS ARM64 JIT.");
         hint.setTextColor(Color.LTGRAY);
         hint.setTextSize(14);
         hint.setGravity(Gravity.CENTER);
@@ -218,7 +218,7 @@ public class MainActivity extends Activity {
             final int encoding = AudioFormat.ENCODING_PCM_16BIT;
 
             int minBuf = AudioTrack.getMinBufferSize(sampleRate, channelConfig, encoding);
-            int bufSize = Math.max(minBuf * 2, 4096 * 4);
+            int bufSize = Math.max(minBuf * 2, 4096 * 2);
 
             audioTrack = new AudioTrack(
                     AudioManager.STREAM_MUSIC,
@@ -230,14 +230,14 @@ public class MainActivity extends Activity {
             audioTrack.play();
 
             audioThread = new Thread(() -> {
-                short[] pcmBuf = new short[2048];
+                short[] pcmBuf = new short[1024];
                 while (isRunning) {
                     int samples = nativeGetAudioSamples(pcmBuf);
                     if (samples > 0) {
                         audioTrack.write(pcmBuf, 0, samples);
                     } else {
                         try {
-                            Thread.sleep(2);
+                            Thread.sleep(4);
                         } catch (InterruptedException ignored) {}
                     }
                 }
@@ -277,7 +277,7 @@ public class MainActivity extends Activity {
     }
 
     /* ================================================================ */
-    /* DSGameView — Rendu réel des 2 écrans DS + Contrôles tactiles     */
+    /* DSGameView — Rendu Hardware GPU accéléré des 2 écrans NDS       */
     /* ================================================================ */
     class DSGameView extends SurfaceView implements SurfaceHolder.Callback, Runnable {
 
@@ -285,11 +285,8 @@ public class MainActivity extends Activity {
         private volatile boolean threadRunning = false;
         private final SurfaceHolder surfaceHolder;
 
-        /* Bitmaps des deux écrans Nintendo DS natifs (256x192 chacun) */
-        private final Bitmap topBitmap;
-        private final Bitmap bottomBitmap;
-        private final int[] topPixels = new int[256 * 192];
-        private final int[] bottomPixels = new int[256 * 192];
+        /* Bitmap unique combiné (256x384 = Écran Haut 256x192 + Écran Bas 256x192) */
+        private final Bitmap combinedBitmap;
 
         /* Masque d'entrées et coordonnées tactiles */
         private int inputMask = 0;
@@ -311,26 +308,25 @@ public class MainActivity extends Activity {
         static final int BTN_X      = 1 << 10;
         static final int BTN_Y      = 1 << 11;
 
-        /* Rectangles d'affichage à l'écran */
-        private final Rect srcRect = new Rect(0, 0, 256, 192);
+        /* Rectangles sources et destinations */
+        private final Rect srcTopRect = new Rect(0, 0, 256, 192);
+        private final Rect srcBottomRect = new Rect(0, 192, 256, 384);
         private final RectF dstTopRect = new RectF();
         private final RectF dstBottomRect = new RectF();
 
         /* Peintures de rendu */
         private final Paint screenPaint = new Paint(Paint.FILTER_BITMAP_FLAG);
-        private final Paint bgPaint = new Paint();
         private final Paint ctrlPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint ctrlTextPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint borderPaint = new Paint();
 
         public DSGameView(Context context) {
             super(context);
             surfaceHolder = getHolder();
             surfaceHolder.addCallback(this);
 
-            topBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
-            bottomBitmap = Bitmap.createBitmap(256, 192, Bitmap.Config.ARGB_8888);
-
-            bgPaint.setColor(Color.parseColor("#121212"));
+            /* Bitmap direct haute performance pour verrouillage natif */
+            combinedBitmap = Bitmap.createBitmap(256, 384, Bitmap.Config.ARGB_8888);
 
             ctrlPaint.setStyle(Paint.Style.FILL);
             ctrlPaint.setColor(Color.argb(120, 200, 200, 200));
@@ -339,12 +335,17 @@ public class MainActivity extends Activity {
             ctrlTextPaint.setTextSize(36f);
             ctrlTextPaint.setTextAlign(Paint.Align.CENTER);
             ctrlTextPaint.setFakeBoldText(true);
+
+            borderPaint.setColor(Color.DKGRAY);
+            borderPaint.setStyle(Paint.Style.STROKE);
+            borderPaint.setStrokeWidth(3f);
         }
 
         public void resume() {
             threadRunning = true;
             if (renderThread == null || !renderThread.isAlive()) {
                 renderThread = new Thread(this, "MelonDS_RenderLoop");
+                renderThread.setPriority(Thread.MAX_PRIORITY);
                 renderThread.start();
             }
         }
@@ -378,7 +379,6 @@ public class MainActivity extends Activity {
             /* Ratio 4:3 DS = 256 / 192 = 1.333 */
             float targetRatio = 256f / 192f;
             
-            /* On réserve la moitié supérieure pour l'écran 1, et la moitié inférieure pour l'écran 2 */
             float screenH = (h * 0.44f);
             float screenW = screenH * targetRatio;
             if (screenW > w * 0.95f) {
@@ -393,50 +393,52 @@ public class MainActivity extends Activity {
 
         @Override
         public void run() {
-            final long FRAME_TIME_NS = 1000000000L / 60L; /* 60 FPS */
+            final long FRAME_TIME_NS = 1000000000L / 60L; /* 16.66 ms */
+            long lastFrameTime = System.nanoTime();
+            int frameskipCounter = 0;
 
             while (threadRunning) {
-                long startTime = System.nanoTime();
+                long now = System.nanoTime();
 
-                /* 1. Émulation matérielle NDS : exécution d'une frame melonDS */
-                boolean frameOk = nativeRunFrame(topPixels, bottomPixels, inputMask, dsTouchX, dsTouchY, dsTouching);
+                /* 1. Émulation matérielle NDS : exécution JIT ARM64 directe dans combinedBitmap */
+                boolean frameOk = nativeRunFrameDirect(combinedBitmap, inputMask, dsTouchX, dsTouchY, dsTouching);
 
-                if (frameOk) {
-                    topBitmap.setPixels(topPixels, 0, 256, 0, 0, 256, 192);
-                    bottomBitmap.setPixels(bottomPixels, 0, 256, 0, 0, 256, 192);
+                /* 2. Rendu graphique matériel accéléré par GPU (Hardware Canvas) */
+                Canvas canvas = null;
+                if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+                    try {
+                        canvas = surfaceHolder.lockHardwareCanvas();
+                    } catch (Exception ignored) {}
+                }
+                if (canvas == null) {
+                    canvas = surfaceHolder.lockCanvas();
                 }
 
-                /* 2. Rendu graphique natif sur SurfaceView */
-                Canvas canvas = surfaceHolder.lockCanvas();
                 if (canvas != null) {
                     try {
-                        canvas.drawPaint(bgPaint);
+                        canvas.drawColor(Color.BLACK);
 
-                        /* Dessin direct des 2 vrais framebuffers Nintendo DS */
-                        canvas.drawBitmap(topBitmap, srcRect, dstTopRect, screenPaint);
-                        canvas.drawBitmap(bottomBitmap, srcRect, dstBottomRect, screenPaint);
+                        /* Dessin des 2 écrans DS directement découpés depuis combinedBitmap */
+                        canvas.drawBitmap(combinedBitmap, srcTopRect, dstTopRect, screenPaint);
+                        canvas.drawBitmap(combinedBitmap, srcBottomRect, dstBottomRect, screenPaint);
 
                         /* Bordure des écrans DS */
-                        Paint borderPaint = new Paint();
-                        borderPaint.setColor(Color.DKGRAY);
-                        borderPaint.setStyle(Paint.Style.STROKE);
-                        borderPaint.setStrokeWidth(3f);
                         canvas.drawRect(dstTopRect, borderPaint);
                         canvas.drawRect(dstBottomRect, borderPaint);
 
-                        /* Rendu des contrôles virtuels transparents */
+                        /* Contrôles tactiles */
                         drawOnScreenControls(canvas);
                     } finally {
                         surfaceHolder.unlockCanvasAndPost(canvas);
                     }
                 }
 
-                /* 3. Régulation 60 FPS */
-                long elapsed = System.nanoTime() - startTime;
-                long sleepNs = FRAME_TIME_NS - elapsed;
-                if (sleepNs > 0) {
+                /* 3. Régulation dynamique (unlockCanvasAndPost gère déjà la VSync du Display) */
+                long frameDuration = System.nanoTime() - now;
+                long sleepNs = FRAME_TIME_NS - frameDuration;
+                if (sleepNs > 2000000L) { // Sommeil uniquement si on a plus de 2ms d'avance
                     try {
-                        Thread.sleep(sleepNs / 1000000L, (int) (sleepNs % 1000000L));
+                        Thread.sleep(sleepNs / 1000000L);
                     } catch (InterruptedException ignored) {}
                 }
             }
